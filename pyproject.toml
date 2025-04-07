@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarm_zoo"
+version = "0.1.0"
+description = "Environments for multi-agent reinforcement learning"
+authors = [{ name = "Maximilian Hüttenrauch", email = "max.huettenrauch@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy<2",
+    "torch",
+    "torch_geometric",
+    "matplotlib",
+    "pyqt5",
+    "pettingzoo",
+]
+
+#[tool.setuptools]
+#packages = ["swarm_zoo"]
