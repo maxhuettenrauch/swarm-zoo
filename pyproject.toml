@@ -11,7 +11,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
     "numpy<2",
-    "torch",
+    "torch<2.3",
     "torch_geometric",
     "matplotlib",
     "pyqt5",
