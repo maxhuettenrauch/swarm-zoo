@@ -4,23 +4,20 @@ from typing import TypeVar
 import gymnasium
 import matplotlib
 
-from swarm_zoo.point_envs.agents import FirstOrderUnicycleAgent, AgentState
-from swarm_zoo.point_envs.base_world import World
-from swarm_zoo.point_envs.utils import get_angle, get_distances, get_distance_matrix
-
 matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-# import torch
-# from gymnasium.core import WrapperObsType
+import scipy.spatial as ssp
+
 from gymnasium.spaces import Box, Dict, Graph, GraphInstance
-# from gymnasium import ObservationWrapper as GymObservationWrapper
 from gymnasium.vector import VectorObservationWrapper
 from pettingzoo import ParallelEnv
-from pettingzoo.utils import parallel_to_aec, wrappers
-from pettingzoo.utils.env import AgentID, ActionType, ObsType
-# from torch_geometric.data import Data
+from pettingzoo.utils import wrappers
+from pettingzoo.utils.env import AgentID, ObsType
 
+from swarm_zoo.point_envs.agents import FirstOrderUnicycleAgent, AgentState
+from swarm_zoo.point_envs.base_world import World
+from swarm_zoo.point_envs.utils import get_angle, get_distances, get_distance_matrix, gather_rows
 
 WrapperObsType = TypeVar("WrapperObsType")
 
@@ -46,13 +43,13 @@ class Rendezvous:
         return {agent.name: agent.get_observation() for agent in self.world.agents}
 
     def get_reward(self):
-        dist = 0.
-        for i, agent in enumerate(self.world.agents[:-1]):
-            agent_pos = agent.state.get_pos()
-            other_pos = np.array([other.state.get_pos() for j, other in enumerate(self.world.agents[i + 1:])])
-            dist += np.sum(get_distances(agent_pos, other_pos, torus=self.world.torus, world_size=self.world_size))
 
-        return -dist / (self.num_agents ** 2 + self.num_agents) * 2
+        agent_pos = np.array([agent.state.get_pos() for agent in self.world.agents])
+        dm = get_distance_matrix(agent_pos, torus=self.world.torus, world_size=self.world_size)
+        dm_flat = ssp.distance.squareform(dm)
+        rew = - np.mean(dm_flat) / (self.world_size[0] / 2 * np.sqrt(2))
+
+        return rew
 
 
 
@@ -96,7 +93,7 @@ class RendezvousEnv(ParallelEnv[str, np.ndarray, np.ndarray]):
         actions_array = [actions[agent] for agent in self.agents]
         self.scenario.world.step(actions_array)
         task_reward = self.scenario.get_reward()
-        action_penalty = 0.1 * np.mean([a ** 2 for a in actions_array])
+        action_penalty = 0.001 * np.mean([a ** 2 for a in actions_array])
         reward = task_reward - action_penalty
 
         # add list of dists to agent 1 from all other agents individually
@@ -160,7 +157,6 @@ class RendezvousEnv(ParallelEnv[str, np.ndarray, np.ndarray]):
 
 @dataclass
 class AgentGraphData:
-    adjacency_matrix: np.ndarray
     distance_matrix: np.ndarray
     angle_matrix: np.ndarray
     relative_angle_matrix: np.ndarray
@@ -180,7 +176,6 @@ class AgentGraphData:
         relative_velocities = np.stack([agent_w_vel - agent.state.get_w_vel() for agent in world.agents], axis=0)
 
         distance_matrix = get_distance_matrix(agent_pos, torus=world.torus, world_size=world_size, add_to_diagonal=-1)
-        adjacency_matrix = np.where((0. < distance_matrix) & (distance_matrix < 10000.0), 1, 0)
 
         angles = np.vstack([get_angle(agent_pos, agent.state.get_pos(),
                                       torus=world.torus, world_size=world_size) - agent.state.theta for agent in world.agents])
@@ -191,7 +186,7 @@ class AgentGraphData:
         relative_orientation = np.vstack([agent.state.theta - agent_theta for agent in world.agents])
         relative_angle_matrix = np.where(relative_orientation > np.pi, relative_orientation - 2 * np.pi, relative_orientation)
 
-        return cls(adjacency_matrix, distance_matrix, angle_matrix, relative_angle_matrix, relative_velocities)
+        return cls(distance_matrix, angle_matrix, relative_angle_matrix, relative_velocities)
 
 
 class ObservationWrapper(wrappers.BaseParallelWrapper):
@@ -223,8 +218,7 @@ class SetObsWrapper(ObservationWrapper):
 
         self.set_observation_space = Dict({
             'set_obs': Box(low=-np.inf, high=np.inf, shape=(self.env.num_agents - 1, 8)),
-            'local_obs': Box(low=-np.inf, high=np.inf, shape=(3, ))
-            # 'local_obs': Box(low=-np.inf, high=np.inf, shape=(4, ))
+            'local_obs': Box(low=-np.inf, high=np.inf, shape=(2, ))
         })
 
         self.full_action_space = Box(low=-1.0, high=1.0, shape=(2, ))
@@ -247,26 +241,23 @@ class SetObsWrapper(ObservationWrapper):
         agent_graph_data = AgentGraphData.from_env(self.env)
 
         new_obs = {agent: {} for agent in self.env.agents}
-        max_observed_agents = np.max(np.sum(agent_graph_data.adjacency_matrix, axis=1))
 
-        # new_obs['set_obs'] = np.zeros((self.env.num_agents, max_observed_agents, 8))
-        # new_obs['local_obs'] = np.zeros((self.env.num_agents, 4))
+        adjacency_matrix = np.where((0. < agent_graph_data.distance_matrix), 1, 0)
+        max_observed_agents = np.max(np.sum(adjacency_matrix, axis=1))
 
         for i in range(self.env.num_agents):
             # TODO: take care of the case where the agent is not connected to any other agent
-            # set_obs = new_obs['set_obs'][i]
             set_obs = np.zeros((max_observed_agents, 8))
-            num_observed_agents = np.sum(agent_graph_data.adjacency_matrix[i])
-            set_obs[:num_observed_agents, 0] = agent_graph_data.distance_matrix[i][agent_graph_data.adjacency_matrix[i] == 1] / 100
-            set_obs[:num_observed_agents, 1] = np.cos(agent_graph_data.angle_matrix[i][agent_graph_data.adjacency_matrix[i] == 1])
-            set_obs[:num_observed_agents, 2] = np.sin(agent_graph_data.angle_matrix[i][agent_graph_data.adjacency_matrix[i] == 1])
-            set_obs[:num_observed_agents, 3] = np.cos(agent_graph_data.relative_angle_matrix[i][agent_graph_data.adjacency_matrix[i] == 1])
-            set_obs[:num_observed_agents, 4] = np.sin(agent_graph_data.relative_angle_matrix[i][agent_graph_data.adjacency_matrix[i] == 1])
-            set_obs[:num_observed_agents, 5:7] = agent_graph_data.relative_velocities[i][agent_graph_data.adjacency_matrix[i] == 1] / 20
+            num_observed_agents = np.sum(adjacency_matrix[i])
+            set_obs[:num_observed_agents, 0] = agent_graph_data.distance_matrix[i][adjacency_matrix[i] == 1] / 100
+            set_obs[:num_observed_agents, 1] = np.cos(agent_graph_data.angle_matrix[i][adjacency_matrix[i] == 1])
+            set_obs[:num_observed_agents, 2] = np.sin(agent_graph_data.angle_matrix[i][adjacency_matrix[i] == 1])
+            set_obs[:num_observed_agents, 3] = np.cos(agent_graph_data.relative_angle_matrix[i][adjacency_matrix[i] == 1])
+            set_obs[:num_observed_agents, 4] = np.sin(agent_graph_data.relative_angle_matrix[i][adjacency_matrix[i] == 1])
+            set_obs[:num_observed_agents, 5:7] = agent_graph_data.relative_velocities[i][adjacency_matrix[i] == 1] / 20
             set_obs[:num_observed_agents, 7] = 1
             new_obs[self.env.agents[i]]['set_obs'] = set_obs
             new_obs[self.env.agents[i]]['local_obs'] = observation[self.env.agents[i]]
-            # new_obs['local_obs'][i] = observation[self.env.agents[i]]
 
         return new_obs
 
@@ -279,7 +270,7 @@ class LimitedSetObsWrapper(ObservationWrapper):
 
         self.set_observation_space = Dict({
             'set_obs': Box(low=-np.inf, high=np.inf, shape=(max_observed_agents, 8)),
-            'local_obs': Box(low=-np.inf, high=np.inf, shape=(4, ))
+            'local_obs': Box(low=-np.inf, high=np.inf, shape=(2, ))
         })
 
         self.full_action_space = Box(low=-1.0, high=1.0, shape=(2,))
@@ -290,7 +281,7 @@ class LimitedSetObsWrapper(ObservationWrapper):
     def action_space(self, agent: AgentID) -> gymnasium.spaces.Space:
         return self.full_action_space
 
-    def observation(self, observation: ObsType) -> WrapperObsType:
+    def observation(self, observation: ObsType) -> dict[str, dict[str, np.ndarray]]:
         # only observe the max_observed_agents closest agents
 
         agent_graph_data = AgentGraphData.from_env(self.env)
@@ -299,11 +290,13 @@ class LimitedSetObsWrapper(ObservationWrapper):
 
         for i in range(self.env.num_agents):
             set_obs = np.zeros((self.max_observed_agents, 8))
-            num_observed_agents = np.sum(agent_graph_data.adjacency_matrix[i])
+            adjacency_matrix = np.where((0. < agent_graph_data.distance_matrix), 1, 0)
+            num_observed_agents = np.sum(adjacency_matrix[i])
             if num_observed_agents > self.max_observed_agents:
                 num_observed_agents = self.max_observed_agents
 
-            n_closest_agents_idx = np.argsort(agent_graph_data.distance_matrix[i])[1:num_observed_agents + 1]
+            n_closest_agents_idx = np.argsort(agent_graph_data.distance_matrix[i])[1:num_observed_agents + 1] # maybe replace with argpartition
+
             set_obs[:num_observed_agents, 0] = agent_graph_data.distance_matrix[i][n_closest_agents_idx] / 100
             set_obs[:num_observed_agents, 1] = np.cos(agent_graph_data.angle_matrix[i][n_closest_agents_idx])
             set_obs[:num_observed_agents, 2] = np.sin(agent_graph_data.angle_matrix[i][n_closest_agents_idx])
@@ -317,38 +310,30 @@ class LimitedSetObsWrapper(ObservationWrapper):
         return new_obs
 
 
-class PyGObsWrapper(VectorObservationWrapper):
+class GraphObsWrapper(VectorObservationWrapper):
     def __init__(self, env: RendezvousEnv):
         super().__init__(env)
 
         graph_observation_space = Graph(
-            # node_space=Box(low=-np.inf, high=np.inf, shape=(3, )),
-            node_space=Box(low=-np.inf, high=np.inf, shape=(4, )),
+            node_space=Box(low=-np.inf, high=np.inf, shape=(2, )),
             edge_space=Box(low=-np.inf, high=np.inf, shape=(7, )),
         )
-
-        # self.dict_graph_observation_space = Dict({
-        #     'local': Box(low=-np.inf, high=np.inf, shape=(0, )),
-        #     'graph': graph_observation_space,
-        # })
 
         self._observation_space = graph_observation_space
 
         self.full_action_space = Box(low=-1.0, high=1.0, shape=(2, ))
 
-    # def observation_space(self, agent: AgentID) -> gymnasium.spaces.Space:
-    #     return self.dict_graph_observation_space
-
-    def observations(self, obs):
+    def observations(self, obs) -> GraphInstance:
 
         agent_graph_data = AgentGraphData.from_env(self.env.par_env)
+        adjacency_matrix = np.where((0. < agent_graph_data.distance_matrix), 1, 0)
 
-        d_flat = agent_graph_data.distance_matrix[agent_graph_data.adjacency_matrix == 1]
-        a_flat = agent_graph_data.angle_matrix[agent_graph_data.adjacency_matrix == 1]
-        ra_flat = agent_graph_data.relative_angle_matrix[agent_graph_data.adjacency_matrix == 1]
-        rv_flat = agent_graph_data.relative_velocities[agent_graph_data.adjacency_matrix == 1]
+        d_flat = agent_graph_data.distance_matrix[adjacency_matrix == 1]
+        a_flat = agent_graph_data.angle_matrix[adjacency_matrix == 1]
+        ra_flat = agent_graph_data.relative_angle_matrix[adjacency_matrix == 1]
+        rv_flat = agent_graph_data.relative_velocities[adjacency_matrix == 1]
 
-        edge_index = np.array(agent_graph_data.adjacency_matrix.nonzero()).T
+        edge_index = np.array(adjacency_matrix.nonzero()).T
         edge_attr = np.zeros((edge_index.shape[0], 7))
         edge_attr[:, 0] = d_flat / 100
         edge_attr[:, 1] = np.cos(a_flat)
@@ -357,35 +342,60 @@ class PyGObsWrapper(VectorObservationWrapper):
         edge_attr[:, 4] = np.sin(ra_flat)
         edge_attr[:, 5:] = rv_flat / 20
 
-        # node_attr = np.array([node_feature for node_feature in observation.values()])
         node_attr = obs
 
-        # edge_index = torch.tensor(agent_graph_data.adjacency_matrix).nonzero().t().contiguous()
-        # edge_attr = torch.tensor(np.stack([d_flat, np.cos(a_flat), np.sin(a_flat),
-        #                                           np.cos(ra_flat), np.sin(ra_flat)], axis=1))
-        # node_attr = torch.tensor([agent.get_observation() for agent in self.env.scenario.world.agents])
-        #
-        # agent_graph = Data(x=node_attr, edge_index=edge_index, edge_attr=edge_attr)
         graph = GraphInstance(node_attr, edge_attr, edge_index)
 
-        # new_obs = {agent: {} for agent in self.env.agents}
-        # for agent in self.env.agents:
-        #     new_obs[agent]['local'] = np.array([])
-        # new_obs['graph'] = graph
-        # return new_obs
-        # TODO: Try returning a pyg Data object, or a dict node_attr, edge_attr, edge_index
         return graph
 
     def env_is_wrapped(self, wrapper_class):
         return self.env.env_is_wrapped(wrapper_class)
 
 
-if __name__ == '__main__':
-    env = RendezvousEnv(num_agents=4, render_mode='human')
-    env = LimitedSetObsWrapper(env, max_observed_agents=2)
-    obs, info = env.reset()
-    for i in range(1000):
-        # actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-        actions = {agent: np.array((1, env.action_space(agent).sample()[1])) for agent in env.agents}
-        obs = env.step(actions)
-    env.close()
+class NearestNeighborGraphObsWrapper(VectorObservationWrapper):
+    def __init__(self, env: RendezvousEnv, max_observed_agents: int):
+        super().__init__(env)
+        self.max_observed_agents = max_observed_agents
+
+        graph_observation_space = Graph(
+            node_space=Box(low=-np.inf, high=np.inf, shape=(2,)),
+            edge_space=Box(low=-np.inf, high=np.inf, shape=(7,)),
+        )
+
+        self._observation_space = graph_observation_space
+
+        self.full_action_space = Box(low=-1.0, high=1.0, shape=(2,))
+
+    def observations(self, obs) -> GraphInstance:
+        agent_graph_data = AgentGraphData.from_env(self.env.par_env)
+        # gather indices of self.max_observed_agents closest agents and self
+        indices = np.argpartition(agent_graph_data.distance_matrix, [0, self.max_observed_agents + 1])[:, :self.max_observed_agents + 1]
+        # obtain distances to self.max_observed_aegnts
+        closest_dists = gather_rows(agent_graph_data.distance_matrix, indices)
+        # obtain maximum distance
+        max_dist = np.max(closest_dists, axis=1)
+        # select self.max_observed_agents closest agents to be neighbors
+        adjacency_matrix = np.where((0. < agent_graph_data.distance_matrix) & (agent_graph_data.distance_matrix <= max_dist[:, None]), 1, 0)
+
+        d_flat = agent_graph_data.distance_matrix[adjacency_matrix == 1]
+        a_flat = agent_graph_data.angle_matrix[adjacency_matrix == 1]
+        ra_flat = agent_graph_data.relative_angle_matrix[adjacency_matrix == 1]
+        rv_flat = agent_graph_data.relative_velocities[adjacency_matrix == 1]
+
+        edge_index = np.array(adjacency_matrix.nonzero()).T
+        edge_attr = np.zeros((edge_index.shape[0], 7))
+        edge_attr[:, 0] = d_flat / 100
+        edge_attr[:, 1] = np.cos(a_flat)
+        edge_attr[:, 2] = np.sin(a_flat)
+        edge_attr[:, 3] = np.cos(ra_flat)
+        edge_attr[:, 4] = np.sin(ra_flat)
+        edge_attr[:, 5:] = rv_flat / 20
+
+        node_attr = obs
+
+        graph = GraphInstance(node_attr, edge_attr, edge_index)
+
+        return graph
+
+    def env_is_wrapped(self, wrapper_class):
+        return self.env.env_is_wrapped(wrapper_class)

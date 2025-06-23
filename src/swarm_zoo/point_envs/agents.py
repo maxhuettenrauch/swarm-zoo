@@ -12,17 +12,19 @@ class AgentState:
     y: float
     theta: float
 
-    # velocity
+    # velocity in world coordinate system
     vx: float = 0.0
     vy: float = 0.0
 
+    # velocity in local polar coordinate system
     v_lin: float = 0.0
     v_ang: float = 0.0
 
-    # acceleration
+    # acceleration in world coordinate system
     ax: float = 0.0
     ay: float = 0.0
 
+    # acceleration in local polar coordinate system
     a_lin: float = 0.0
     a_ang: float = 0.0
 
@@ -80,8 +82,7 @@ class FirstOrderUnicycleAgent(PointAgent):
         self.max_v_ang = agent_params.max_v_ang
 
         self.action_space = spaces.Box(low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]))
-        # self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(3,))
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(4,))
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(2,))
 
     def step(self, action: np.ndarray):
         next_x = self.state.x
@@ -110,7 +111,6 @@ class FirstOrderUnicycleAgent(PointAgent):
     def get_observation(self):
         state = self.state.get_state()
         # only return locally observable state
-        # return state[0:3] / 1000.
-        local_state = state[[5, 6, 9, 10]]
+        local_state = state[[5, 6]]
         # normalize
-        return local_state / np.array([self.max_v_lin, self.max_v_ang, 1., 1.])
+        return local_state / np.array([self.max_v_lin, self.max_v_ang])

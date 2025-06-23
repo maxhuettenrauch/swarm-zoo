@@ -31,3 +31,9 @@ def get_distance_matrix(points: np.ndarray,
     distance_matrix = np.vstack([get_distances(points, p, torus=torus, world_size=world_size) for p in points])
     distance_matrix = distance_matrix + np.diag(add_to_diagonal * np.ones(points.shape[0]))
     return distance_matrix
+
+
+def gather_rows(values: np.ndarray, indices: np.ndarray) -> np.ndarray:
+    """gather values at indices given as an array """
+    assert len(values) == len(indices)
+    return values[np.arange(values.shape[0])[:, None], indices]
